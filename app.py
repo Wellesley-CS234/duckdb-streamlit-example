@@ -87,7 +87,6 @@ def get_column_stats(conn, table_name, column_name):
 # --- Streamlit App Layout ---
 
 st.title("🦆 DuckDB Explorer")
-st.markdown(f"**Database File:** `{DUCKDB_PATH}`")
 
 conn = get_db_connection()
 
