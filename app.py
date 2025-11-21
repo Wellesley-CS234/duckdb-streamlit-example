@@ -9,7 +9,7 @@ from functools import wraps
 st.set_page_config(layout="wide", page_title="DuckDB Remote Analytics")
 
 DATABASE_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
-"https://cs.wellesley.edu/~eni/duckdb/2024_wiki_views.duckdb"
+#"https://cs.wellesley.edu/~eni/duckdb/2024_wiki_views.duckdb"
 
 # --- Utility Functions ---
 
@@ -159,9 +159,13 @@ def page_article_analysis():
 
     # 3. Data Fetching and Top 10 Calculation
     if selected_month:
+        # Start date as a string literal (e.g., '2024-01-01')
         start_date = f"'{selected_month}-01'"
-        # DuckDB handles the end date calculation easily with interval arithmetic
-        end_date = f"DATE_TRUNC('month', {start_date}) + INTERVAL 1 MONTH"
+        
+        # FIX: Calculate the end date by casting the start date string to DATE (using ::DATE)
+        # and adding 1 MONTH. This avoids the ambiguous DATE_TRUNC call.
+        # This will result in the first day of the following month (e.g., '2024-02-01').
+        end_date = f"{start_date}::DATE + INTERVAL 1 MONTH" 
 
         with st.spinner(f"Analyzing articles for {selected_month}..."):
             try:
@@ -172,7 +176,8 @@ def page_article_analysis():
                         article,
                         SUM(pageviews) AS total_monthly_pageviews
                     FROM data_table
-                    WHERE date >= {start_date} AND date < {end_date}
+                    -- FIX: Explicitly cast start_date string to DATE for comparison
+                    WHERE date >= {start_date}::DATE AND date < {end_date}
                     GROUP BY 1
                 )
                 SELECT
@@ -216,7 +221,8 @@ def page_article_analysis():
                     SUM(pageviews) AS daily_pageviews
                 FROM data_table
                 WHERE article IN ({articles_list_sql})
-                  AND date >= {start_date} AND date < {end_date}
+                  -- FIX: Explicitly cast start_date string to DATE for comparison
+                  AND date >= {start_date}::DATE AND date < {end_date}
                 GROUP BY 1, 2
                 ORDER BY date;
                 """
