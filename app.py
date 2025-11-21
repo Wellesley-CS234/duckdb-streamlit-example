@@ -58,11 +58,23 @@ def get_column_stats(conn, table_name, column_name):
     """
     column_type = conn.execute(column_info_query).fetchdf()['data_type'].iloc[0]
 
+    # Decide which unique count query to run based on data type
+    if 'VARCHAR' in column_type or 'CHAR' in column_type or 'STRING' in column_type:
+        # FOR STRING/TEXT COLUMNS: Aggressive normalization to remove hidden characters
+        # 1. REGEXP_REPLACE removes all non-printable/control characters (like \r, \n, \0).
+        # 2. TRIM removes standard leading/trailing spaces.
+        # 3. LOWER ensures case-insensitivity.
+        distinct_count_expression = f"COUNT(DISTINCT TRIM(LOWER(REGEXP_REPLACE(\"{column_name}\", '[^\\x20-\\x7E]', '', 'g'))))"
+        # The regex '[^\\x20-\\x7E]' matches any character outside the standard printable ASCII range.
+    else:
+        # FOR NUMERIC/DATE/BOOLEAN COLUMNS: Standard distinct count is sufficient.
+        distinct_count_expression = f"COUNT(DISTINCT \"{column_name}\")"
+
     # Get unique value count and total non-NULL values
     stats_query = f"""
     SELECT 
         COUNT(*) AS total_rows, 
-        COUNT(DISTINCT \"{column_name}\") AS unique_values,
+        {distinct_count_expression} AS unique_values,
         COUNT(\"{column_name}\") AS non_null_count
     FROM \"{table_name}\";
     """
@@ -77,7 +89,7 @@ def get_column_stats(conn, table_name, column_name):
     stats = {
         "Data Type": column_type,
         "Total Rows in Table": total_rows,
-        "Unique Values": unique_count,
+        "Unique Values (Aggressively Normalized)": unique_count,
         "Non-NULL Values": non_null_count,
         "NULL Values": null_count,
         "Uniqueness Ratio": f"{unique_count / total_rows * 100:.2f}%" if total_rows > 0 else "N/A"
