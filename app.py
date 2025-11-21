@@ -2,7 +2,8 @@ import streamlit as st
 import duckdb
 import pandas as pd
 
-
+# IMPORTANT: Update this URL to the publicly accessible HTTPS URL 
+# (e.g., https://yourdomain.com/my_duckdb.db)
 DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
 
 # --- Functions to interact with DuckDB ---
@@ -43,6 +44,16 @@ def get_table_list(conn):
 
     return pd.DataFrame(table_data)
 
+def get_sample_data(conn, table_name, limit=10):
+    """Retrieves a sample of rows from the specified table."""
+    try:
+        query = f"SELECT * FROM \"{table_name}\" LIMIT {limit};"
+        sample_df = conn.execute(query).fetchdf()
+        return sample_df
+    except Exception as e:
+        st.error(f"Error fetching sample data: {e}")
+        return pd.DataFrame()
+
 def get_column_stats(conn, table_name, column_name):
     """Retrieves summary statistics for a selected column."""
     
@@ -77,11 +88,9 @@ def get_column_stats(conn, table_name, column_name):
     stats_df = conn.execute(stats_query).fetchdf()
 
     # --- DEBUGGING OUTPUT: Check the raw query result ---
-    st.subheader("🔍 DEBUG: Raw Statistics DataFrame (`stats_df`)")
-    st.markdown("This shows the direct result from the DuckDB query.")
-    st.code(stats_df.to_string(), language='text')
-    # -----------------------------------------------------
-
+    # We will move this output display outside of this function to keep data processing clean.
+    # For now, we return the raw DataFrame as well for external display.
+    
     # Calculate additional statistics
     total_rows = stats_df['total_rows'].iloc[0]
     unique_count = stats_df['unique_values'].iloc[0]
@@ -97,9 +106,9 @@ def get_column_stats(conn, table_name, column_name):
         "Uniqueness Ratio": f"{unique_count / total_rows * 100:.2f}%" if total_rows > 0 else "N/A"
     }
 
-    return stats
+    return stats, stats_df # Return both the formatted stats and the raw stats_df
 
-# --- Streamlit App Layout (The rest of the app layout remains the same) ---
+# --- Streamlit App Layout ---
 
 st.title("🦆 DuckDB Explorer")
 st.markdown(f"**Database File:** `{DUCKDB_URL}`")
@@ -119,7 +128,7 @@ if conn:
 
     # --- Section 2: Column Selection and Summary Statistics ---
     
-    st.header("2. Column Summary Statistics")
+    st.header("2. Column Analysis")
     
     # 2a. Table Selection
     available_tables = table_df['Table Name'].tolist()
@@ -132,6 +141,15 @@ if conn:
         available_tables
     )
 
+    # --- NEW SECTION: Sample Data View ---
+    st.subheader(f"2A. First 10 Rows of Table: `{selected_table}`")
+    sample_data = get_sample_data(conn, selected_table)
+    st.dataframe(sample_data, use_container_width=True)
+    
+    st.divider()
+    
+    st.subheader(f"2B. Summary Statistics for Selected Column")
+    
     # 2b. Column Selection
     # Fetch column names for the selected table
     columns_query = f"PRAGMA table_info('{selected_table}');"
@@ -147,10 +165,16 @@ if conn:
         # 2c. Display Statistics
         st.subheader(f"Statistics for Column: `{selected_column}`")
 
-        # Get and format the stats
-        stats = get_column_stats(conn, selected_table, selected_column)
+        # Get and format the stats, and the raw stats_df
+        stats, stats_df = get_column_stats(conn, selected_table, selected_column)
         
-        # Convert stats dict to a DataFrame for clean display
+        # Display DEBUGGING output
+        st.subheader("🔍 DEBUG: Raw Statistics DataFrame (`stats_df`)")
+        st.markdown("This shows the direct result from the DuckDB query.")
+        st.code(stats_df.to_string(), language='text')
+        
+        # Display final formatted stats
+        st.subheader("Formatted Column Statistics")
         stats_df_display = pd.DataFrame(list(stats.items()), columns=['Metric', 'Value'])
         
         st.table(stats_df_display)
