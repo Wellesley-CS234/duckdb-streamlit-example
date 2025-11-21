@@ -9,19 +9,31 @@ from functools import wraps
 st.set_page_config(layout="wide", page_title="DuckDB Remote Analytics")
 
 DATABASE_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
+"https://cs.wellesley.edu/~eni/duckdb/2024_wiki_views.duckdb"
 
 # --- Utility Functions ---
 
 # Function to handle connection and caching
 @st.cache_resource
 def get_duckdb_connection():
-    """Establishes and caches the DuckDB connection to the remote file."""
     try:
-        # DuckDB automatically handles fetching the remote file chunks
-        con = duckdb.connect(database=DATABASE_URL, read_only=True)
-        return con
+        # 1. Connect to an in-memory database first
+        conn = duckdb.connect(database=':memory:', read_only=False) 
+        
+        # 2. Install and Load the HTTPFS extension
+        # DuckDB requires the extension to read remote files
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        
+        # 3. Use the URL in a READ_ONLY command
+        # This tells DuckDB to treat the remote URL as the database
+        conn.execute(f"ATTACH '{DATABASE_URL}' AS remote_db (READ_ONLY)")
+        conn.execute("USE remote_db;") 
+        return conn
+    
     except Exception as e:
-        st.error(f"Error connecting to DuckDB file at {DATABASE_URL}: {e}")
+        st.error(f"Error connecting to DuckDB via HTTPFS: {e}")
+        st.error("Make sure your database file is publicly accessible and the URL is correct.")
         st.stop()
         return None
 
