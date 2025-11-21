@@ -121,76 +121,130 @@ def page_timeseries_analysis():
             st.error(f"An error occurred during Timeseries Analysis: {e}")
 
 
-def page_project_breakdown():
-    st.markdown("## 🌐 Project Pageview Breakdown by Country")
-    st.markdown("Select a country to see how pageviews are distributed across different projects (e.g., `en.wikipedia`).")
+def page_article_analysis():
+    st.markdown("## 📰 Top 10 Article Performance")
+    st.markdown("Select a month to identify the top 10 articles by total pageviews and view their daily trends.")
 
-    # --- 1. Get List of Unique Country Codes for the Selector (Cached) ---
+    # --- 1. Get List of Available Months (Cached) ---
     @st.cache_data(ttl=3600)
     @retry_query()
-    def get_country_codes():
-        """Fetches a sorted list of unique country_codes."""
+    def get_available_months():
+        """Fetches a sorted list of unique year-month strings (YYYY-MM)."""
         try:
-            # Query only the distinct country codes
-            df_countries = run_duckdb_query("SELECT DISTINCT country_code FROM data_table WHERE country_code IS NOT NULL ORDER BY country_code;")
-            return df_countries['country_code'].tolist()
+            # Extract distinct year and month, format as YYYY-MM
+            df_months = run_duckdb_query("""
+                SELECT DISTINCT
+                    STRFTIME(DATE_TRUNC('month', date), '%Y-%m') AS month_key
+                FROM data_table
+                ORDER BY month_key DESC;
+            """)
+            return df_months['month_key'].tolist()
         except Exception as e:
-            st.error(f"Failed to fetch country codes: {e}")
+            st.error(f"Failed to fetch available months: {e}")
             return []
 
-    country_codes = get_country_codes()
+    available_months = get_available_months()
 
-    if not country_codes:
-        st.warning("Could not load country codes from the database. Please check the connection and table name.")
+    if not available_months:
+        st.warning("Could not load available months from the database. Please check the connection and table name.")
         return
 
     # 2. Interactive Selector
-    selected_country = st.selectbox(
-        "Select a Country Code:",
-        options=country_codes,
-        index=country_codes.index('US') if 'US' in country_codes else 0,
-        key='country_selector'
+    selected_month = st.selectbox(
+        "Select a Month (YYYY-MM):",
+        options=available_months,
+        index=0,
+        key='month_selector'
     )
 
-    # 3. Data Fetching
-    if selected_country:
-        with st.spinner(f"Fetching project data for {selected_country}..."):
-            # Sanitize input (Streamlit handles some, but good practice for SQL)
-            safe_country = selected_country.replace("'", "''")
+    # 3. Data Fetching and Top 10 Calculation
+    if selected_month:
+        start_date = f"'{selected_month}-01'"
+        # DuckDB handles the end date calculation easily with interval arithmetic
+        end_date = f"DATE_TRUNC('month', {start_date}) + INTERVAL 1 MONTH"
 
-            query = f"""
-            SELECT
-                project,
-                SUM(pageviews) AS total_pageviews
-            FROM data_table
-            WHERE country_code = '{safe_country}'
-            GROUP BY 1
-            ORDER BY 2 DESC;
-            """
+        with st.spinner(f"Analyzing articles for {selected_month}..."):
             try:
-                df_projects = run_duckdb_query(query)
+                # 3a. Query to find the Top 10 articles by total views in the selected month
+                top_articles_query = f"""
+                WITH MonthlyTotals AS (
+                    SELECT
+                        article,
+                        SUM(pageviews) AS total_monthly_pageviews
+                    FROM data_table
+                    WHERE date >= {start_date} AND date < {end_date}
+                    GROUP BY 1
+                )
+                SELECT
+                    article,
+                    total_monthly_pageviews
+                FROM MonthlyTotals
+                ORDER BY total_monthly_pageviews DESC
+                LIMIT 10;
+                """
+                df_top_articles = run_duckdb_query(top_articles_query)
 
-                if df_projects.empty:
-                    st.info(f"No project data found for country code: {selected_country}")
+                if df_top_articles.empty:
+                    st.info(f"No article data found for {selected_month}.")
                     return
 
-                # 4. Visualization using Altair
-                chart = alt.Chart(df_projects).mark_bar().encode(
-                    x=alt.X('project', sort='-y', title='Project'),
-                    y=alt.Y('total_pageviews', title='Total Pageviews'),
-                    tooltip=['project', 'total_pageviews'],
-                    color=alt.Color('project', legend=None)
+                # 4. Display Top 10 Table
+                st.subheader(f"Top 10 Articles in {selected_month}")
+                # Rename columns for display
+                display_df = df_top_articles.rename(
+                    columns={
+                        'article': 'Article Title',
+                        'total_monthly_pageviews': 'Total Pageviews'
+                    }
+                )
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+                # 5. Get Daily Pageviews for the Top 10 Articles
+                # Extract the names of the top 10 articles to use in the IN clause
+                top_article_names = [name.replace("'", "''") for name in df_top_articles['article'].tolist()]
+                
+                # Check if we have articles to query for daily views
+                if not top_article_names:
+                    return
+
+                articles_list_sql = ", ".join(f"'{name}'" for name in top_article_names)
+
+                daily_views_query = f"""
+                SELECT
+                    date,
+                    article,
+                    SUM(pageviews) AS daily_pageviews
+                FROM data_table
+                WHERE article IN ({articles_list_sql})
+                  AND date >= {start_date} AND date < {end_date}
+                GROUP BY 1, 2
+                ORDER BY date;
+                """
+                df_daily_views = run_duckdb_query(daily_views_query)
+                
+                if df_daily_views.empty:
+                    st.warning(f"Could not retrieve daily view data for the top articles in {selected_month}.")
+                    return
+
+                df_daily_views['date'] = pd.to_datetime(df_daily_views['date'])
+
+                # 6. Visualization using Altair
+                st.subheader(f"Daily Pageview Trend for Top 10 Articles")
+
+                chart = alt.Chart(df_daily_views).mark_line(point=True).encode(
+                    x=alt.X('date', title='Day of the Month'),
+                    y=alt.Y('daily_pageviews', title='Daily Pageviews'),
+                    color=alt.Color('article', title='Article'),
+                    tooltip=['date', 'article', 'daily_pageviews']
                 ).properties(
-                    title=f'Total Pageviews by Project in {selected_country}'
+                    height=500
                 ).interactive()
 
                 st.altair_chart(chart, use_container_width=True)
-                st.markdown("---")
-                st.caption("Raw Data Preview")
-                st.dataframe(df_projects, use_container_width=True)
 
             except Exception as e:
-                st.error(f"An error occurred during Project Breakdown Analysis: {e}")
+                st.error(f"An error occurred during Article Analysis: {e}")
+
 
 # --- Main App Logic (Sidebar Navigation) ---
 
@@ -201,14 +255,14 @@ if 'page' not in st.session_state:
 st.sidebar.title("App Navigation")
 selection = st.sidebar.radio(
     "Go to",
-    options=['Pageview Time Series', 'Project Breakdown'],
+    options=['Pageview Time Series', 'Top Article Analysis'], # Updated option
     index=0
 )
 
 # Use the selection to route to the correct page function
 if selection == 'Pageview Time Series':
     page_timeseries_analysis()
-elif selection == 'Project Breakdown':
-    page_project_breakdown()
+elif selection == 'Top Article Analysis': # Updated route
+    page_article_analysis()
 
 st.sidebar.markdown("---")
