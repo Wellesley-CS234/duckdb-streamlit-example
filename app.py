@@ -1,232 +1,202 @@
 import streamlit as st
 import duckdb
 import pandas as pd
+import altair as alt
+import time
+from functools import wraps
 
-DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2024_wiki_views.duckdb"
+# --- Configuration ---
+st.set_page_config(layout="wide", page_title="DuckDB Remote Analytics")
 
-# --- Functions to interact with DuckDB ---
+DATABASE_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
 
+# --- Utility Functions ---
+
+# Function to handle connection and caching
 @st.cache_resource
-def get_db_connection():
-    """Establishes and caches the DuckDB connection via HTTPS/HTTPFS."""
+def get_duckdb_connection():
+    """Establishes and caches the DuckDB connection to the remote file."""
     try:
-        # 1. Connect to an in-memory database first
-        conn = duckdb.connect(database=':memory:', read_only=False) 
-        
-        # 2. Install and Load the HTTPFS extension
-        conn.execute("INSTALL httpfs;")
-        conn.execute("LOAD httpfs;")
-        
-        # 3. Use the URL in a READ_ONLY command
-        conn.execute(f"ATTACH '{DUCKDB_URL}' AS remote_db (READ_ONLY)")
-        conn.execute("USE remote_db;") 
-        
-        return conn
+        # DuckDB automatically handles fetching the remote file chunks
+        con = duckdb.connect(database=DATABASE_URL, read_only=True)
+        return con
     except Exception as e:
-        st.error(f"Error connecting to DuckDB via HTTPFS: {e}")
-        st.error("Make sure your database file is publicly accessible and the URL is correct.")
+        st.error(f"Error connecting to DuckDB file at {DATABASE_URL}: {e}")
         st.stop()
         return None
 
-def get_table_list(conn):
-    """Retrieves a list of tables and their row counts."""
-    query_tables = "SHOW ALL TABLES;"
-    tables_df = conn.execute(query_tables).fetchdf()
+# Retry decorator for temporary network issues
+def retry_query(max_retries=3, delay=2):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        st.warning(f"Query failed (Attempt {attempt + 1}/{max_retries}). Retrying in {delay}s...")
+                        time.sleep(delay)
+                    else:
+                        raise e
+            return None
+        return wrapper
+    return decorator
 
-    table_data = []
-    for table_name in tables_df['name']:
-        # Get the row count for each table
-        row_count_query = f"SELECT count(*) FROM \"{table_name}\";"
-        row_count = conn.execute(row_count_query).fetchone()[0]
-        table_data.append({'Table Name': table_name, 'Row Count': row_count})
+@retry_query()
+def run_duckdb_query(query):
+    """Executes a SQL query on the cached connection and returns a DataFrame."""
+    con = get_duckdb_connection()
+    if con:
+        # Use an f-string to ensure the table name is correctly referenced
+        return con.execute(query).fetchdf()
+    return pd.DataFrame()
 
-    return pd.DataFrame(table_data)
+# --- Page Definitions ---
 
-def get_sample_data(conn, table_name, limit=10):
-    """Retrieves a sample of rows from the specified table."""
-    try:
-        query = f"SELECT * FROM \"{table_name}\" LIMIT {limit};"
-        sample_df = conn.execute(query).fetchdf()
-        return sample_df
-    except Exception as e:
-        st.error(f"Error fetching sample data: {e}")
-        return pd.DataFrame()
+def page_timeseries_analysis():
+    st.markdown("## 📈 Pageview Time Series Analysis")
 
-def get_distinct_sample(conn, table_name, distinct_expression, limit=5):
-    """Retrieves a sample of distinct values using the normalization expression."""
-    try:
-        # Build a query that applies the normalization and then gets distinct values
-        query = f"""
-        SELECT 
-            {distinct_expression} AS normalized_value 
-        FROM \"{table_name}\" 
-        WHERE \"{distinct_expression.split('(')[0].strip('"')}\" IS NOT NULL -- Safely retrieve column name
-        GROUP BY 1
-        LIMIT {limit};
-        """
-        distinct_df = conn.execute(query).fetchdf()
-        return distinct_df
-    except Exception as e:
-        st.warning(f"Could not run distinct sample query: {e}")
-        return pd.DataFrame()
-
-
-def get_column_stats(conn, table_name, column_name):
-    """Retrieves summary statistics for a selected column."""
-    
-    # Get column data type
-    column_info_query = f"""
-    SELECT column_name, data_type 
-    FROM information_schema.columns 
-    WHERE table_name = '{table_name}' AND column_name = '{column_name}';
-    """
-    column_type = conn.execute(column_info_query).fetchdf()['data_type'].iloc[0]
-    
-    # Define the expression for normalization and distinct counting
-    distinct_expression_raw = f"\"{column_name}\""
-
-    if 'VARCHAR' in column_type or 'CHAR' in column_type or 'STRING' in column_type:
-        # Aggressive normalization
-        normalized_column_expression = f"TRIM(LOWER(REGEXP_REPLACE(\"{column_name}\", '[^\\x20-\\x7E]', '', 'g')))"
-        
-        # --- NEW STRATEGY: Use a subquery with GROUP BY for accurate counting ---
-        # The COUNT(DISTINCT) function might be relying on incomplete metadata via HTTPFS.
-        # GROUP BY forces the engine to scan and group all unique, normalized values.
-        
-        # 1. Get total rows and non-null count (standard)
-        base_stats_query = f"""
-        SELECT 
-            COUNT(*) AS total_rows, 
-            COUNT(\"{column_name}\") AS non_null_count
-        FROM \"{table_name}\";
-        """
-        base_stats_df = conn.execute(base_stats_query).fetchdf()
-        
-        # 2. Get accurate distinct count using GROUP BY
-        distinct_count_query = f"""
-        SELECT 
-            COUNT(*) AS unique_values
-        FROM 
-            (SELECT {normalized_column_expression} AS distinct_group FROM \"{table_name}\" GROUP BY 1) AS subquery;
-        """
-        distinct_count = conn.execute(distinct_count_query).fetchone()[0]
-        
-        # Merge results into a single stats_df for consistency
-        stats_df = base_stats_df.copy()
-        stats_df['unique_values'] = distinct_count
-        
-        distinct_expression_normalized = normalized_column_expression
-        
-    else:
-        # FOR NUMERIC/DATE/BOOLEAN COLUMNS: Standard distinct count is sufficient.
-        distinct_count_expression = f"COUNT(DISTINCT {distinct_expression_raw})"
-        stats_query = f"""
-        SELECT 
-            COUNT(*) AS total_rows, 
-            {distinct_count_expression} AS unique_values,
-            COUNT(\"{column_name}\") AS non_null_count
-        FROM \"{table_name}\";
-        """
-        stats_df = conn.execute(stats_query).fetchdf()
-        distinct_expression_normalized = distinct_expression_raw # Use raw name for sampling
-
-    # Calculate additional statistics
-    total_rows = stats_df['total_rows'].iloc[0]
-    unique_count = stats_df['unique_values'].iloc[0]
-    non_null_count = stats_df['non_null_count'].iloc[0]
-    null_count = total_rows - non_null_count
-    
-    stats = {
-        "Data Type": column_type,
-        "Total Rows in Table": total_rows,
-        "Unique Values (Robust Count)": unique_count, # Renamed metric for clarity
-        "Non-NULL Values": non_null_count,
-        "NULL Values": null_count,
-        "Uniqueness Ratio": f"{unique_count / total_rows * 100:.2f}%" if total_rows > 0 else "N/A"
-    }
-
-    # Return formatted stats, raw stats_df, and the distinct expression for sampling outside
-    return stats, stats_df, distinct_expression_normalized 
-
-# --- Streamlit App Layout (Rest of the code remains the same) ---
-
-st.title("🦆 DuckDB Explorer")
-st.markdown(f"**Database File:** `{DUCKDB_URL}`")
-
-conn = get_db_connection()
-
-if conn:
-    
-    # --- Section 1: Table List and Row Counts ---
-    
-    st.header("1. Database Tables & Row Counts")
-    
-    table_df = get_table_list(conn)
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
-    
-    st.divider()
-
-    # --- Section 2: Column Selection and Summary Statistics ---
-    
-    st.header("2. Column Analysis")
-    
-    # 2a. Table Selection
-    available_tables = table_df['Table Name'].tolist()
-    if not available_tables:
-        st.warning("No tables found in the database.")
-        st.stop()
-
-    selected_table = st.selectbox(
-        "Select a table to analyze:",
-        available_tables
+    # 1. Date Aggregation Selector
+    agg_period = st.radio(
+        "Aggregate by:",
+        ('Day', 'Week', 'Month'),
+        index=0,
+        horizontal=True,
+        key='timeseries_agg_period'
     )
 
-    # --- Sample Data View ---
-    st.subheader(f"2A. First 10 Rows of Table: `{selected_table}`")
-    sample_data = get_sample_data(conn, selected_table)
-    st.dataframe(sample_data, use_container_width=True)
-    
-    st.divider()
-    
-    st.subheader(f"2B. Summary Statistics for Selected Column")
-    
-    # 2b. Column Selection
-    # Fetch column names for the selected table
-    columns_query = f"PRAGMA table_info('{selected_table}');"
-    columns_df = conn.execute(columns_query).fetchdf()
-    column_names = columns_df['name'].tolist()
+    # Map radio choice to DuckDB date truncation function
+    date_format_map = {
+        'Day': 'DATE_TRUNC(\'day\', date)',
+        'Week': 'DATE_TRUNC(\'week\', date)',
+        'Month': 'DATE_TRUNC(\'month\', date)'
+    }
+    date_trunc_sql = date_format_map[agg_period]
 
-    if column_names:
-        selected_column = st.selectbox(
-            f"Select a column from **{selected_table}**:",
-            column_names
-        )
+    # 2. Data Fetching
+    with st.spinner(f"Fetching data aggregated by {agg_period}..."):
+        query = f"""
+        SELECT
+            {date_trunc_sql} AS period,
+            SUM(pageviews) AS total_pageviews
+        FROM data_table
+        GROUP BY 1
+        ORDER BY 1;
+        """
+        try:
+            df_timeseries = run_duckdb_query(query)
 
-        # 2c. Display Statistics
-        st.subheader(f"Statistics for Column: `{selected_column}`")
+            if df_timeseries.empty:
+                st.info("No data returned for the time series analysis.")
+                return
 
-        # Get stats, raw df, and the normalized expression
-        stats, stats_df, distinct_expression_normalized = get_column_stats(conn, selected_table, selected_column)
-        
-        # Display DEBUGGING output for raw stats
-        st.subheader("🔍 DEBUG: Raw Statistics DataFrame (`stats_df`)")
-        st.markdown("This shows the base count result (Total Rows, Non-Null Count) and the Robust Unique Count.")
-        st.code(stats_df.to_string(), language='text')
+            # Ensure the 'period' column is datetime type for Altair
+            df_timeseries['period'] = pd.to_datetime(df_timeseries['period'])
 
-        # --- NEW DEBUGGING STEP: Display Sample of Distinct Values ---
-        if 'VARCHAR' in stats['Data Type']:
-            st.subheader("🔍 DEBUG: Sample of Normalized Distinct Values (First 5)")
-            st.markdown("This shows what the `GROUP BY` query actually sees as unique values.")
-            
-            distinct_sample_df = get_distinct_sample(conn, selected_table, selected_column, distinct_expression_normalized)
-            
-            if distinct_sample_df.empty:
-                st.warning("Could not retrieve distinct value sample.")
-            else:
-                st.code(distinct_sample_df.to_string(), language='text')
-            
-        # Display final formatted stats
-        st.subheader("Formatted Column Statistics")
-        stats_df_display = pd.DataFrame(list(stats.items()), columns=['Metric', 'Value'])
-        
-        st.table(stats_df_display)
+            # 3. Visualization using Altair
+            chart = alt.Chart(df_timeseries).mark_line(point=True).encode(
+                x=alt.X('period', title=agg_period),
+                y=alt.Y('total_pageviews', title='Total Pageviews'),
+                tooltip=['period', 'total_pageviews']
+            ).properties(
+                title=f'Total Pageviews by {agg_period}'
+            ).interactive() # Allows zooming and panning
+
+            st.altair_chart(chart, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"An error occurred during Timeseries Analysis: {e}")
+
+
+def page_project_breakdown():
+    st.markdown("## 🌐 Project Pageview Breakdown by Country")
+    st.markdown("Select a country to see how pageviews are distributed across different projects (e.g., `en.wikipedia`).")
+
+    # --- 1. Get List of Unique Country Codes for the Selector (Cached) ---
+    @st.cache_data(ttl=3600)
+    @retry_query()
+    def get_country_codes():
+        """Fetches a sorted list of unique country_codes."""
+        try:
+            # Query only the distinct country codes
+            df_countries = run_duckdb_query("SELECT DISTINCT country_code FROM data_table WHERE country_code IS NOT NULL ORDER BY country_code;")
+            return df_countries['country_code'].tolist()
+        except Exception as e:
+            st.error(f"Failed to fetch country codes: {e}")
+            return []
+
+    country_codes = get_country_codes()
+
+    if not country_codes:
+        st.warning("Could not load country codes from the database. Please check the connection and table name.")
+        return
+
+    # 2. Interactive Selector
+    selected_country = st.selectbox(
+        "Select a Country Code:",
+        options=country_codes,
+        index=country_codes.index('US') if 'US' in country_codes else 0,
+        key='country_selector'
+    )
+
+    # 3. Data Fetching
+    if selected_country:
+        with st.spinner(f"Fetching project data for {selected_country}..."):
+            # Sanitize input (Streamlit handles some, but good practice for SQL)
+            safe_country = selected_country.replace("'", "''")
+
+            query = f"""
+            SELECT
+                project,
+                SUM(pageviews) AS total_pageviews
+            FROM data_table
+            WHERE country_code = '{safe_country}'
+            GROUP BY 1
+            ORDER BY 2 DESC;
+            """
+            try:
+                df_projects = run_duckdb_query(query)
+
+                if df_projects.empty:
+                    st.info(f"No project data found for country code: {selected_country}")
+                    return
+
+                # 4. Visualization using Altair
+                chart = alt.Chart(df_projects).mark_bar().encode(
+                    x=alt.X('project', sort='-y', title='Project'),
+                    y=alt.Y('total_pageviews', title='Total Pageviews'),
+                    tooltip=['project', 'total_pageviews'],
+                    color=alt.Color('project', legend=None)
+                ).properties(
+                    title=f'Total Pageviews by Project in {selected_country}'
+                ).interactive()
+
+                st.altair_chart(chart, use_container_width=True)
+                st.markdown("---")
+                st.caption("Raw Data Preview")
+                st.dataframe(df_projects, use_container_width=True)
+
+            except Exception as e:
+                st.error(f"An error occurred during Project Breakdown Analysis: {e}")
+
+# --- Main App Logic (Sidebar Navigation) ---
+
+# Initialize session state for navigation
+if 'page' not in st.session_state:
+    st.session_state.page = 'timeseries'
+
+st.sidebar.title("App Navigation")
+selection = st.sidebar.radio(
+    "Go to",
+    options=['Pageview Time Series', 'Project Breakdown'],
+    index=0
+)
+
+# Use the selection to route to the correct page function
+if selection == 'Pageview Time Series':
+    page_timeseries_analysis()
+elif selection == 'Project Breakdown':
+    page_project_breakdown()
+
+st.sidebar.markdown("---")
