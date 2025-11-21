@@ -4,7 +4,7 @@ import pandas as pd
 
 # --- Configuration ---
 
-DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_wiews.duckdb"
+DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
 
 
 # --- Functions to interact with DuckDB ---
