@@ -2,10 +2,8 @@ import streamlit as st
 import duckdb
 import pandas as pd
 
-# --- Configuration ---
 
 DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
-
 
 # --- Functions to interact with DuckDB ---
 
@@ -17,16 +15,14 @@ def get_db_connection():
         conn = duckdb.connect(database=':memory:', read_only=False) 
         
         # 2. Install and Load the HTTPFS extension
-        # DuckDB requires the extension to read remote files
         conn.execute("INSTALL httpfs;")
         conn.execute("LOAD httpfs;")
         
         # 3. Use the URL in a READ_ONLY command
-        # This tells DuckDB to treat the remote URL as the database
         conn.execute(f"ATTACH '{DUCKDB_URL}' AS remote_db (READ_ONLY)")
         conn.execute("USE remote_db;") 
+        
         return conn
-    
     except Exception as e:
         st.error(f"Error connecting to DuckDB via HTTPFS: {e}")
         st.error("Make sure your database file is publicly accessible and the URL is correct.")
@@ -80,6 +76,12 @@ def get_column_stats(conn, table_name, column_name):
     """
     stats_df = conn.execute(stats_query).fetchdf()
 
+    # --- DEBUGGING OUTPUT: Check the raw query result ---
+    st.subheader("🔍 DEBUG: Raw Statistics DataFrame (`stats_df`)")
+    st.markdown("This shows the direct result from the DuckDB query.")
+    st.code(stats_df.to_string(), language='text')
+    # -----------------------------------------------------
+
     # Calculate additional statistics
     total_rows = stats_df['total_rows'].iloc[0]
     unique_count = stats_df['unique_values'].iloc[0]
@@ -97,9 +99,10 @@ def get_column_stats(conn, table_name, column_name):
 
     return stats
 
-# --- Streamlit App Layout ---
+# --- Streamlit App Layout (The rest of the app layout remains the same) ---
 
 st.title("🦆 DuckDB Explorer")
+st.markdown(f"**Database File:** `{DUCKDB_URL}`")
 
 conn = get_db_connection()
 
