@@ -123,7 +123,7 @@ def page_timeseries_analysis():
 
 def page_article_analysis():
     st.markdown("## 📰 Top 10 Article Performance")
-    st.markdown("Select a month to identify the top 10 articles by total pageviews and view their daily trends.")
+    st.markdown("Select a month to identify the top 10 articles by total pageviews and view their daily trends. **The dominant 'Main_Page' is excluded from this analysis.**")
 
     # --- 1. Get List of Available Months (Cached) ---
     @st.cache_data(ttl=3600)
@@ -162,9 +162,7 @@ def page_article_analysis():
         # Start date as a string literal (e.g., '2024-01-01')
         start_date = f"'{selected_month}-01'"
         
-        # FIX: Calculate the end date by casting the start date string to DATE (using ::DATE)
-        # and adding 1 MONTH. This avoids the ambiguous DATE_TRUNC call.
-        # This will result in the first day of the following month (e.g., '2024-02-01').
+        # Calculate the end date (first day of the following month)
         end_date = f"{start_date}::DATE + INTERVAL 1 MONTH" 
 
         with st.spinner(f"Analyzing articles for {selected_month}..."):
@@ -176,8 +174,10 @@ def page_article_analysis():
                         article,
                         SUM(pageviews) AS total_monthly_pageviews
                     FROM data_table
-                    -- FIX: Explicitly cast start_date string to DATE for comparison
-                    WHERE date >= {start_date}::DATE AND date < {end_date}
+                    -- Apply month filter and exclusion filter
+                    WHERE date >= {start_date}::DATE 
+                      AND date < {end_date}
+                      AND article != 'Main_Page' -- Exclusion added here
                     GROUP BY 1
                 )
                 SELECT
@@ -190,11 +190,11 @@ def page_article_analysis():
                 df_top_articles = run_duckdb_query(top_articles_query)
 
                 if df_top_articles.empty:
-                    st.info(f"No article data found for {selected_month}.")
+                    st.info(f"No article data found (excluding 'Main_Page') for {selected_month}.")
                     return
 
                 # 4. Display Top 10 Table
-                st.subheader(f"Top 10 Articles in {selected_month}")
+                st.subheader(f"Top 10 Articles in {selected_month} (Excluding Main_Page)")
                 # Rename columns for display
                 display_df = df_top_articles.rename(
                     columns={
@@ -208,7 +208,6 @@ def page_article_analysis():
                 # Extract the names of the top 10 articles to use in the IN clause
                 top_article_names = [name.replace("'", "''") for name in df_top_articles['article'].tolist()]
                 
-                # Check if we have articles to query for daily views
                 if not top_article_names:
                     return
 
@@ -221,8 +220,10 @@ def page_article_analysis():
                     SUM(pageviews) AS daily_pageviews
                 FROM data_table
                 WHERE article IN ({articles_list_sql})
-                  -- FIX: Explicitly cast start_date string to DATE for comparison
-                  AND date >= {start_date}::DATE AND date < {end_date}
+                  -- Apply month filter and exclusion filter
+                  AND date >= {start_date}::DATE 
+                  AND date < {end_date}
+                  AND article != 'Main_Page' -- Exclusion added here for safety/completeness
                 GROUP BY 1, 2
                 ORDER BY date;
                 """
