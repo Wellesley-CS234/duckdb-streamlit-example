@@ -2,9 +2,7 @@ import streamlit as st
 import duckdb
 import pandas as pd
 
-# IMPORTANT: Update this URL to the publicly accessible HTTPS URL 
-# (e.g., https://yourdomain.com/my_duckdb.db)
-DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2023_wiki_views.duckdb"
+DUCKDB_URL = "https://cs.wellesley.edu/~eni/duckdb/2024_wiki_views.duckdb"
 
 # --- Functions to interact with DuckDB ---
 
@@ -54,6 +52,25 @@ def get_sample_data(conn, table_name, limit=10):
         st.error(f"Error fetching sample data: {e}")
         return pd.DataFrame()
 
+def get_distinct_sample(conn, table_name, distinct_expression, limit=5):
+    """Retrieves a sample of distinct values using the normalization expression."""
+    try:
+        # Build a query that applies the normalization and then gets distinct values
+        query = f"""
+        SELECT 
+            {distinct_expression} AS normalized_value 
+        FROM \"{table_name}\" 
+        WHERE \"{distinct_expression.split('(')[0].strip('"')}\" IS NOT NULL -- Safely retrieve column name
+        GROUP BY 1
+        LIMIT {limit};
+        """
+        distinct_df = conn.execute(query).fetchdf()
+        return distinct_df
+    except Exception as e:
+        st.warning(f"Could not run distinct sample query: {e}")
+        return pd.DataFrame()
+
+
 def get_column_stats(conn, table_name, column_name):
     """Retrieves summary statistics for a selected column."""
     
@@ -64,33 +81,55 @@ def get_column_stats(conn, table_name, column_name):
     WHERE table_name = '{table_name}' AND column_name = '{column_name}';
     """
     column_type = conn.execute(column_info_query).fetchdf()['data_type'].iloc[0]
+    
+    # Define the expression for normalization and distinct counting
+    distinct_expression_raw = f"\"{column_name}\""
 
-    # Decide which unique count query to run based on data type
     if 'VARCHAR' in column_type or 'CHAR' in column_type or 'STRING' in column_type:
-        # FOR STRING/TEXT COLUMNS: Aggressive normalization to remove hidden characters
-        # 1. REGEXP_REPLACE removes all non-printable/control characters (like \r, \n, \0).
-        # 2. TRIM removes standard leading/trailing spaces.
-        # 3. LOWER ensures case-insensitivity.
-        distinct_count_expression = f"COUNT(DISTINCT TRIM(LOWER(REGEXP_REPLACE(\"{column_name}\", '[^\\x20-\\x7E]', '', 'g'))))"
-        # The regex '[^\\x20-\\x7E]' matches any character outside the standard printable ASCII range.
+        # Aggressive normalization
+        normalized_column_expression = f"TRIM(LOWER(REGEXP_REPLACE(\"{column_name}\", '[^\\x20-\\x7E]', '', 'g')))"
+        
+        # --- NEW STRATEGY: Use a subquery with GROUP BY for accurate counting ---
+        # The COUNT(DISTINCT) function might be relying on incomplete metadata via HTTPFS.
+        # GROUP BY forces the engine to scan and group all unique, normalized values.
+        
+        # 1. Get total rows and non-null count (standard)
+        base_stats_query = f"""
+        SELECT 
+            COUNT(*) AS total_rows, 
+            COUNT(\"{column_name}\") AS non_null_count
+        FROM \"{table_name}\";
+        """
+        base_stats_df = conn.execute(base_stats_query).fetchdf()
+        
+        # 2. Get accurate distinct count using GROUP BY
+        distinct_count_query = f"""
+        SELECT 
+            COUNT(*) AS unique_values
+        FROM 
+            (SELECT {normalized_column_expression} AS distinct_group FROM \"{table_name}\" GROUP BY 1) AS subquery;
+        """
+        distinct_count = conn.execute(distinct_count_query).fetchone()[0]
+        
+        # Merge results into a single stats_df for consistency
+        stats_df = base_stats_df.copy()
+        stats_df['unique_values'] = distinct_count
+        
+        distinct_expression_normalized = normalized_column_expression
+        
     else:
         # FOR NUMERIC/DATE/BOOLEAN COLUMNS: Standard distinct count is sufficient.
-        distinct_count_expression = f"COUNT(DISTINCT \"{column_name}\")"
+        distinct_count_expression = f"COUNT(DISTINCT {distinct_expression_raw})"
+        stats_query = f"""
+        SELECT 
+            COUNT(*) AS total_rows, 
+            {distinct_count_expression} AS unique_values,
+            COUNT(\"{column_name}\") AS non_null_count
+        FROM \"{table_name}\";
+        """
+        stats_df = conn.execute(stats_query).fetchdf()
+        distinct_expression_normalized = distinct_expression_raw # Use raw name for sampling
 
-    # Get unique value count and total non-NULL values
-    stats_query = f"""
-    SELECT 
-        COUNT(*) AS total_rows, 
-        {distinct_count_expression} AS unique_values,
-        COUNT(\"{column_name}\") AS non_null_count
-    FROM \"{table_name}\";
-    """
-    stats_df = conn.execute(stats_query).fetchdf()
-
-    # --- DEBUGGING OUTPUT: Check the raw query result ---
-    # We will move this output display outside of this function to keep data processing clean.
-    # For now, we return the raw DataFrame as well for external display.
-    
     # Calculate additional statistics
     total_rows = stats_df['total_rows'].iloc[0]
     unique_count = stats_df['unique_values'].iloc[0]
@@ -100,15 +139,16 @@ def get_column_stats(conn, table_name, column_name):
     stats = {
         "Data Type": column_type,
         "Total Rows in Table": total_rows,
-        "Unique Values (Aggressively Normalized)": unique_count,
+        "Unique Values (Robust Count)": unique_count, # Renamed metric for clarity
         "Non-NULL Values": non_null_count,
         "NULL Values": null_count,
         "Uniqueness Ratio": f"{unique_count / total_rows * 100:.2f}%" if total_rows > 0 else "N/A"
     }
 
-    return stats, stats_df # Return both the formatted stats and the raw stats_df
+    # Return formatted stats, raw stats_df, and the distinct expression for sampling outside
+    return stats, stats_df, distinct_expression_normalized 
 
-# --- Streamlit App Layout ---
+# --- Streamlit App Layout (Rest of the code remains the same) ---
 
 st.title("🦆 DuckDB Explorer")
 st.markdown(f"**Database File:** `{DUCKDB_URL}`")
@@ -141,7 +181,7 @@ if conn:
         available_tables
     )
 
-    # --- NEW SECTION: Sample Data View ---
+    # --- Sample Data View ---
     st.subheader(f"2A. First 10 Rows of Table: `{selected_table}`")
     sample_data = get_sample_data(conn, selected_table)
     st.dataframe(sample_data, use_container_width=True)
@@ -165,14 +205,26 @@ if conn:
         # 2c. Display Statistics
         st.subheader(f"Statistics for Column: `{selected_column}`")
 
-        # Get and format the stats, and the raw stats_df
-        stats, stats_df = get_column_stats(conn, selected_table, selected_column)
+        # Get stats, raw df, and the normalized expression
+        stats, stats_df, distinct_expression_normalized = get_column_stats(conn, selected_table, selected_column)
         
-        # Display DEBUGGING output
+        # Display DEBUGGING output for raw stats
         st.subheader("🔍 DEBUG: Raw Statistics DataFrame (`stats_df`)")
-        st.markdown("This shows the direct result from the DuckDB query.")
+        st.markdown("This shows the base count result (Total Rows, Non-Null Count) and the Robust Unique Count.")
         st.code(stats_df.to_string(), language='text')
-        
+
+        # --- NEW DEBUGGING STEP: Display Sample of Distinct Values ---
+        if 'VARCHAR' in stats['Data Type']:
+            st.subheader("🔍 DEBUG: Sample of Normalized Distinct Values (First 5)")
+            st.markdown("This shows what the `GROUP BY` query actually sees as unique values.")
+            
+            distinct_sample_df = get_distinct_sample(conn, selected_table, selected_column, distinct_expression_normalized)
+            
+            if distinct_sample_df.empty:
+                st.warning("Could not retrieve distinct value sample.")
+            else:
+                st.code(distinct_sample_df.to_string(), language='text')
+            
         # Display final formatted stats
         st.subheader("Formatted Column Statistics")
         stats_df_display = pd.DataFrame(list(stats.items()), columns=['Metric', 'Value'])
