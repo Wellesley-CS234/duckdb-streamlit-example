@@ -193,18 +193,7 @@ def page_article_analysis():
                     st.info(f"No article data found (excluding 'Main_Page') for {selected_month}.")
                     return
 
-                # 4. Display Top 10 Table
-                st.subheader(f"Top 10 Articles in {selected_month} (Excluding Main_Page)")
-                # Rename columns for display
-                display_df = df_top_articles.rename(
-                    columns={
-                        'article': 'Article Title',
-                        'total_monthly_pageviews': 'Total Pageviews'
-                    }
-                )
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-                # 5. Get Daily Pageviews for the Top 10 Articles
+                # 4. Get Daily Pageviews for the Top 10 Articles
                 # Extract the names of the top 10 articles to use in the IN clause
                 top_article_names = [name.replace("'", "''") for name in df_top_articles['article'].tolist()]
                 
@@ -235,7 +224,8 @@ def page_article_analysis():
 
                 df_daily_views['date'] = pd.to_datetime(df_daily_views['date'])
 
-                # 6. Visualization using Altair
+
+                # 5. Visualization using Altair
                 st.subheader(f"Daily Pageview Trend for Top 10 Articles")
 
                 chart = alt.Chart(df_daily_views).mark_line(point=True).encode(
@@ -248,6 +238,18 @@ def page_article_analysis():
                 ).interactive()
 
                 st.altair_chart(chart, use_container_width=True)
+
+            
+             # 6. Display Top 10 Table
+                st.subheader(f"Top 10 Articles in {selected_month} (Excluding Main_Page)")
+                # Rename columns for display
+                display_df = df_top_articles.rename(
+                    columns={
+                        'article': 'Article Title',
+                        'total_monthly_pageviews': 'Total Pageviews'
+                    }
+                )
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
 
             except Exception as e:
                 st.error(f"An error occurred during Article Analysis: {e}")
